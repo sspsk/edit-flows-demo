@@ -16,9 +16,6 @@
 # 
 # We can vary the distributions from which we sample these parameters to create a target distribution of varying modelling complexity. Further, our choice of the base distribution can also be adjusted to create more or less complex training setup. We will elaborate on this further in the training section.
 
-# In[35]:
-
-
 # Function to generate sinusoidal sequence data with optional noise
 
 import numpy as np
@@ -62,24 +59,21 @@ def plot_sequences(xs: np.ndarray, title: str = "Sequences", pad_token: int | No
     plt.show()
 
 
-# In[36]:
-
-
 # Visualize some examples of the generated sinusoidal sequence dataset
 # 
-n_samples = 5
-seq_len = 128
-g_noise = 0.05
-vocab_size = 128
-num_cycles_fn = lambda: np.random.uniform(1, 4)
-x_int_fn = lambda: np.random.uniform(0, 2 * np.pi)
-
-ys = [
-    make_sinusoidal_sequence(seq_len, noise=g_noise, num_cycles_fn=num_cycles_fn, x_int_fn=x_int_fn)
-    for _ in range(n_samples)
-]
-ys = np.clip(vocab_size * np.array(ys), 0, vocab_size - 1)
-plot_sequences(ys, title="Sinusoidal Sequences with Noise")
+#n_samples = 5
+#seq_len = 128
+#g_noise = 0.05
+#vocab_size = 128
+#num_cycles_fn = lambda: np.random.uniform(1, 4)
+#x_int_fn = lambda: np.random.uniform(0, 2 * np.pi)
+#
+#ys = [
+#    make_sinusoidal_sequence(seq_len, noise=g_noise, num_cycles_fn=num_cycles_fn, x_int_fn=x_int_fn)
+#    for _ in range(n_samples)
+#]
+#ys = np.clip(vocab_size * np.array(ys), 0, vocab_size - 1)
+#plot_sequences(ys, title="Sinusoidal Sequences with Noise")
 
 
 # ## Training Edit Flow Models
@@ -128,7 +122,13 @@ from torchtyping import TensorType as T
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import argparse
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--load_model", action="store_true", default=False)
+args = parser.parse_args()
+
+TRAIN_MODEL = not args.load_model
 
 class SinusoidalTimeEmbedding(nn.Module):
     """
@@ -272,12 +272,10 @@ class SimpleEditFlowsTransformer(nn.Module):
         )
 
 
-# In[62]:
-
+from utils import * # noqa
+from flow import KappaScheduler, Coupling, EmptyCoupling, sample_p
 
 # Setup the model and optimizer
-V = 128
-L = 128
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -285,13 +283,13 @@ np.random.seed(42)
 model = SimpleEditFlowsTransformer(
     vocab_size=V+2,  # +2 for PAD + BOS tokens
     hidden_dim=512,
-    num_layers=8,
+    num_layers=12,
     num_heads=32,
     max_seq_len=2*L,
     pad_token_id=V,
     bos_token_id=V+1,
 )
-optim = torch.optim.Adam(model.parameters(), lr=0.0001)
+optim = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # Print some model statistics and details
 print(f"Model: {model.__class__.__name__}")
@@ -317,8 +315,6 @@ print(f"  Learning rate: {optim.defaults['lr']}")
 
 # Helper functions for training the model
 
-from utils import * # noqa
-from flow import KappaScheduler, Coupling, EmptyCoupling, sample_p
 
 def sample_cond_pt(p0: torch.Tensor, p1: torch.Tensor, t: torch.Tensor, kappa: KappaScheduler):
     t = t.reshape(-1, 1, 1)
@@ -482,19 +478,21 @@ from IPython.display import clear_output
 
 debug = False
 metrics = defaultdict(list)
-batch_size = 128
-min_seq_len = 64
-max_seq_len = 128
+batch_size = 256
+min_seq_len = L//2
+max_seq_len = L
 
 seq_align_fn = opt_align_xs_to_zs
 # seq_align_fn = shifted_align_xs_to_zs
 
-num_cycles_fn = lambda: np.random.uniform(2.5, 4)
-# num_cycles_fn = lambda: 3.5
-x_int_fn = lambda: np.random.uniform(0, 2*np.pi)
+#num_cycles_fn = lambda: np.random.uniform(1.,2.5)
+num_cycles_fn = lambda: 1.0
+
+#x_int_fn = lambda: np.random.uniform(0, 2*np.pi)
+x_int_fn = lambda: 0.0
 
 generator_fn = lambda x1: make_x0_with_bounds(batch_size=int(x1.shape[0]), min_length=min_seq_len, max_length=max_seq_len,
-                                              vocab_size=V, pad_token=PAD_TOKEN, num_cycles_fn=lambda: np.random.uniform(1., 2.5), x_int_fn=x_int_fn)
+                                              vocab_size=V, pad_token=PAD_TOKEN, num_cycles_fn= num_cycles_fn, x_int_fn=lambda: np.random.uniform(0, 2*np.pi),noise=0.0)
 # generator_fn = lambda x1: make_x0_like_x1(
 #     x1, vocab_size=V, pad_token=PAD_TOKEN, num_cycles_fn=lambda: np.random.uniform(1, 2.5), x_int_fn=x_int_fn)
 
@@ -513,175 +511,177 @@ device = torch.device(
 model.to(device)
 model.train()
 
-steps = 400000 // batch_size
-pbar = tqdm(range(steps), desc="Training Edit Flows", unit="step")
+if TRAIN_MODEL:
+    steps = 1600000 // batch_size
+    pbar = tqdm(range(steps), desc="Training Edit Flows", unit="step")
 
-for step in pbar:
-    # samples batch of pairs, timestep, and aligns to Z space
-    x_0, x_1, z_0, z_1, t, _ = make_batch(
-        batch_size=batch_size,
-        min_length=min_seq_len,
-        max_length=max_seq_len,
-        vocab_size=V,
-        coupling=coupling,
-        seq_align_fn=seq_align_fn,
-        num_cycles_fn=num_cycles_fn,
-        x_int_fn=x_int_fn,
-    )
-    z_t = sample_cond_pt(x2prob(z_0, V+3), x2prob(z_1, V+3), t, scheduler)  # interpolates in Z space
-    x_t, x_pad_mask, z_gap_mask, z_pad_mask = rm_gap_tokens(z_t)            # removes gap tokens and pads to max length
-    assert (~x_pad_mask).sum(1).max().item() == x_t.shape[1]
+    for step in pbar:
+        # samples batch of pairs, timestep, and aligns to Z space
+        x_0, x_1, z_0, z_1, t, _ = make_batch(
+            batch_size=batch_size,
+            min_length=min_seq_len,
+            max_length=max_seq_len,
+            vocab_size=V,
+            coupling=coupling,
+            seq_align_fn=seq_align_fn,
+            num_cycles_fn=num_cycles_fn,
+            x_int_fn=x_int_fn,
+            noise=0.0
+        )
+        z_t = sample_cond_pt(x2prob(z_0, V+3), x2prob(z_1, V+3), t, scheduler)  # interpolates in Z space
+        x_t, x_pad_mask, z_gap_mask, z_pad_mask = rm_gap_tokens(z_t)            # removes gap tokens and pads to max length
+        assert (~x_pad_mask).sum(1).max().item() == x_t.shape[1]
 
-    if debug:
-        print(x_0.shape, z_0.shape, x_t.shape)
-        pretty_print(x_0[0], compact=True)
-        pretty_print(x_t[0], compact=True)
-        pretty_print(x_1[0], compact=True)
-        print(t[0].item())
-        pretty_print(z_0[0], compact=True)
-        pretty_print(z_t[0], compact=True)
-        pretty_print(z_1[0], compact=True)
-        print()
+        if debug:
+            print(x_0.shape, z_0.shape, x_t.shape)
+            pretty_print(x_0[0], compact=True)
+            pretty_print(x_t[0], compact=True)
+            pretty_print(x_1[0], compact=True)
+            print(t[0].item())
+            pretty_print(z_0[0], compact=True)
+            pretty_print(z_t[0], compact=True)
+            pretty_print(z_1[0], compact=True)
+            print()
 
-    # uz_mask indicates which operations bring z_t closer to z_1 (batch_size, z_seq_len, 2 * vocab_size + 1)
-    uz_mask = make_ut_mask_from_z(
-        cast(T["batch_size", "z_seq_len", "long"], z_t),
-        cast(T["batch_size", "z_seq_len", "long"], z_1),
-        vocab_size=V+2,  # +2 for PAD and BOS tokens
-    )
+        # uz_mask indicates which operations bring z_t closer to z_1 (batch_size, z_seq_len, 2 * vocab_size + 1)
+        uz_mask = make_ut_mask_from_z(
+            cast(T["batch_size", "z_seq_len", "long"], z_t),
+            cast(T["batch_size", "z_seq_len", "long"], z_1),
+            vocab_size=V+2,  # +2 for PAD and BOS tokens
+        )
 
-    # Feeds x_t, t to the model to obtain rates and probabilities for edit operations
-    u_t, ins_probs, sub_probs = model.forward(
-        tokens=cast(T["batch_size", "x_seq_len", "long"], x_t.to(device)),
-        time_step=cast(T["batch_size", 1, "float"], t.to(device)),
-        padding_mask=cast(T["batch_size", "x_seq_len", "bool"], x_pad_mask.to(device)),
-    )
-    lambda_ins = u_t[:, :, 0]       # Insertion rate        (batch_size, x_seq_len)
-    lambda_sub = u_t[:, :, 1]       # Substitution rate     (batch_size, x_seq_len)
-    lambda_del = u_t[:, :, 2]       # Deletion rate         (batch_size, x_seq_len)
+        # Feeds x_t, t to the model to obtain rates and probabilities for edit operations
+        u_t, ins_probs, sub_probs = model.forward(
+            tokens=cast(T["batch_size", "x_seq_len", "long"], x_t.to(device)),
+            time_step=cast(T["batch_size", 1, "float"], t.to(device)),
+            padding_mask=cast(T["batch_size", "x_seq_len", "bool"], x_pad_mask.to(device)),
+        )
+        lambda_ins = u_t[:, :, 0]       # Insertion rate        (batch_size, x_seq_len)
+        lambda_sub = u_t[:, :, 1]       # Substitution rate     (batch_size, x_seq_len)
+        lambda_del = u_t[:, :, 2]       # Deletion rate         (batch_size, x_seq_len)
 
-    assert u_t[x_pad_mask].sum() == 0
-    assert ins_probs[x_pad_mask].sum() == 0
-    assert sub_probs[x_pad_mask].sum() == 0
-    assert sub_probs[~x_pad_mask].sum(-1).allclose(torch.ones_like(sub_probs[~x_pad_mask].sum(-1)))
-    assert ins_probs[~x_pad_mask].sum(-1).allclose(torch.ones_like(ins_probs[~x_pad_mask].sum(-1)))
-    assert uz_mask[z_pad_mask].any() == False
+        assert u_t[x_pad_mask].sum() == 0
+        assert ins_probs[x_pad_mask].sum() == 0
+        assert sub_probs[x_pad_mask].sum() == 0
+        assert sub_probs[~x_pad_mask].sum(-1).allclose(torch.ones_like(sub_probs[~x_pad_mask].sum(-1)))
+        assert ins_probs[~x_pad_mask].sum(-1).allclose(torch.ones_like(ins_probs[~x_pad_mask].sum(-1)))
+        assert uz_mask[z_pad_mask].any() == False
 
-    u_tia_ins = lambda_ins.unsqueeze(-1) * ins_probs    # (batch_size, x_seq_len, vocab_size)
-    u_tia_sub = lambda_sub.unsqueeze(-1) * sub_probs    # (batch_size, x_seq_len, vocab_size)
-    u_tia_del = lambda_del.unsqueeze(-1)                # (batch_size, x_seq_len, 1)
+        u_tia_ins = lambda_ins.unsqueeze(-1) * ins_probs    # (batch_size, x_seq_len, vocab_size)
+        u_tia_sub = lambda_sub.unsqueeze(-1) * sub_probs    # (batch_size, x_seq_len, vocab_size)
+        u_tia_del = lambda_del.unsqueeze(-1)                # (batch_size, x_seq_len, 1)
 
-    ux_cat = torch.cat([u_tia_ins, u_tia_sub, u_tia_del], dim=-1)           # (batch_size, x_seq_len, 2 * vocab_size + 1)
-    uz_cat = fill_gap_tokens_with_repeats(ux_cat, z_gap_mask, z_pad_mask)   # (batch_size, z_seq_len, 2 * vocab_size + 1)
-    u_tot = u_t.sum(dim=(1, 2))                                             # (batch_size,)
+        ux_cat = torch.cat([u_tia_ins, u_tia_sub, u_tia_del], dim=-1)           # (batch_size, x_seq_len, 2 * vocab_size + 1)
+        uz_cat = fill_gap_tokens_with_repeats(ux_cat, z_gap_mask, z_pad_mask)   # (batch_size, z_seq_len, 2 * vocab_size + 1)
+        u_tot = u_t.sum(dim=(1, 2))                                             # (batch_size,)
 
-    if debug:
-        for i in range(uz_mask.shape[1]):
-            opcodes = uz_mask[0, i].nonzero(as_tuple=True)[0]
-            rate_vec_hash = hashlib.sha256(uz_cat[0, i].detach().cpu().numpy().tobytes()).hexdigest()[:16]
-            assert opcodes.ndim == 1
-            print(f"pos {i}: {z_t[0, i].item()} -> {z_1[0, i].item()}; rate hash: {rate_vec_hash}") 
-            if opcodes.numel() > 0:
-                opcode = opcodes.item()
-                operation = "insert" if opcode < (V+2) else "substitute" if opcode < 2*(V+2) else "delete"
-                new_token = safe_chr(int(opcode%(V+2)), compact=True) if operation != "delete" else None
-                print(f"operation: {operation}; token: {new_token}")
+        if debug:
+            for i in range(uz_mask.shape[1]):
+                opcodes = uz_mask[0, i].nonzero(as_tuple=True)[0]
+                rate_vec_hash = hashlib.sha256(uz_cat[0, i].detach().cpu().numpy().tobytes()).hexdigest()[:16]
+                assert opcodes.ndim == 1
+                print(f"pos {i}: {z_t[0, i].item()} -> {z_1[0, i].item()}; rate hash: {rate_vec_hash}") 
+                if opcodes.numel() > 0:
+                    opcode = opcodes.item()
+                    operation = "insert" if opcode < (V+2) else "substitute" if opcode < 2*(V+2) else "delete"
+                    new_token = safe_chr(int(opcode%(V+2)), compact=True) if operation != "delete" else None
+                    print(f"operation: {operation}; token: {new_token}")
 
-    if torch.isnan(ux_cat).any():
-        raise ValueError("NaN detected in ux_cat")
-    if torch.isnan(uz_cat).any():
-        raise ValueError("NaN detected in uz_cat")
+        if torch.isnan(ux_cat).any():
+            raise ValueError("NaN detected in ux_cat")
+        if torch.isnan(uz_cat).any():
+            raise ValueError("NaN detected in uz_cat")
 
-    assert uz_cat.shape[1] == z_t.shape[1]
-    assert uz_cat.shape[1] >= ux_cat.shape[1]
-    assert ux_cat[x_pad_mask].sum() == 0
-    assert uz_cat[z_pad_mask].sum() == 0
-    assert uz_cat[uz_cat < 0].sum() == 0
-    if debug:
-        break
+        assert uz_cat.shape[1] == z_t.shape[1]
+        assert uz_cat.shape[1] >= ux_cat.shape[1]
+        assert ux_cat[x_pad_mask].sum() == 0
+        assert uz_cat[z_pad_mask].sum() == 0
+        assert uz_cat[uz_cat < 0].sum() == 0
+        if debug:
+            break
 
-    # Compute Bregman divergence loss
-    sched_coeff = (scheduler.derivative(t) / (1 - scheduler(t))).to(device)    
-    log_uz_cat = torch.clamp(uz_cat.log(), min=-20)
-    loss = u_tot - (log_uz_cat * uz_mask.to(device) * sched_coeff.unsqueeze(-1)).sum(dim=(1, 2))
-    loss = loss.mean()
+        # Compute Bregman divergence loss
+        sched_coeff = (scheduler.derivative(t) / (1 - scheduler(t))).to(device)    
+        log_uz_cat = torch.clamp(uz_cat.log(), min=-20)
+        loss = u_tot - (log_uz_cat * uz_mask.to(device) * sched_coeff.unsqueeze(-1)).sum(dim=(1, 2))
+        loss = loss.mean()
 
-    assert not torch.isnan(loss) and not torch.isinf(loss), "Loss is NaN or Inf"
+        assert not torch.isnan(loss) and not torch.isinf(loss), "Loss is NaN or Inf"
 
-    optim.zero_grad()
-    loss.backward()
-    optim.step()
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
 
-    u_ins = lambda_ins.sum(dim=1).mean().detach().cpu()
-    u_del = lambda_del.sum(dim=1).mean().detach().cpu()
-    u_sub = lambda_sub.sum(dim=1).mean().detach().cpu()
-    u_con = (uz_cat * uz_mask.to(device)).sum(dim=(1, 2)).mean().detach().cpu()
+        u_ins = lambda_ins.sum(dim=1).mean().detach().cpu()
+        u_del = lambda_del.sum(dim=1).mean().detach().cpu()
+        u_sub = lambda_sub.sum(dim=1).mean().detach().cpu()
+        u_con = (uz_cat * uz_mask.to(device)).sum(dim=(1, 2)).mean().detach().cpu()
 
-    metrics["loss"].append(loss.item())
-    metrics["u_tot"].append(u_tot.mean().item())
-    metrics["u_ins"].append(u_ins.item())
-    metrics["u_del"].append(u_del.item())
-    metrics["u_sub"].append(u_sub.item())
-    metrics["u_con"].append(u_con.item())
+        metrics["loss"].append(loss.item())
+        metrics["u_tot"].append(u_tot.mean().item())
+        metrics["u_ins"].append(u_ins.item())
+        metrics["u_del"].append(u_del.item())
+        metrics["u_sub"].append(u_sub.item())
+        metrics["u_con"].append(u_con.item())
 
-    if step % 100 == 0:
-        clear_output(wait=True)  # Clear previous output
-        print(f"Step {step}: Loss = {loss.item():.4f}, "
-            f"u_tot = {u_tot.mean().item():.4f}, "
-            f"u_ins = {u_ins:.4f}, "
-            f"u_del = {u_del:.4f}, "
-            f"u_sub = {u_sub:.4f}, "
-            f"u_con = {u_con:.4f}")
-        sys.stdout.flush()
-
-
-# In[22]:
+        if step % 100 == 0:
+            clear_output(wait=True)  # Clear previous output
+            print(f"Step {step}: Loss = {loss.item():.4f}, "
+                f"u_tot = {u_tot.mean().item():.4f}, "
+                f"u_ins = {u_ins:.4f}, "
+                f"u_del = {u_del:.4f}, "
+                f"u_sub = {u_sub:.4f}, "
+                f"u_con = {u_con:.4f}")
+            sys.stdout.flush()
 
 
-# Visualize the training metrics
+    # In[22]:
 
-import pandas as pd
-import matplotlib.pyplot as plt
 
-# 1 row, 3 columns
-plt.figure(figsize=(18, 5))
+    # Visualize the training metrics
 
-# 1. Plot loss (raw and smoothed)
-plt.subplot(1, 3, 1)
-plt.plot(metrics["loss"], label='Raw Loss', color='lightblue', alpha=0.6)
-smoothed_losses = pd.Series(metrics["loss"]).ewm(alpha=0.1).mean()
-plt.plot(smoothed_losses, label='Smoothed Loss (EMA)', color='blue', linewidth=2)
-plt.xlabel('Step')
-plt.ylabel('Loss')
-plt.title('Training Loss Over Time')
-plt.grid(True, alpha=0.3)
-plt.legend()
+    import pandas as pd
+    import matplotlib.pyplot as plt
 
-# 2. Plot u_ins, u_del, u_sub
-plt.subplot(1, 3, 2)
-plt.plot(metrics["u_ins"], label='u_ins', color='green')
-plt.plot(metrics["u_del"], label='u_del', color='red')
-plt.plot(metrics["u_sub"], label='u_sub', color='purple')
-plt.xlabel('Step')
-plt.ylabel('Value')
-plt.title('u_ins, u_del, u_sub Over Time')
-plt.grid(True, alpha=0.3)
-plt.legend()
+    # 1 row, 3 columns
+    plt.figure(figsize=(18, 5))
 
-# 3. Plot u_tot and u_con
-plt.subplot(1, 3, 3)
-plt.plot(metrics["u_tot"], label='u_tot', color='orange')
-plt.plot(metrics["u_con"], label='u_con', color='brown')
-plt.xlabel('Step')
-plt.ylabel('Value')
-plt.title('u_tot and u_con Over Time')
-plt.grid(True, alpha=0.3)
-plt.legend()
+    # 1. Plot loss (raw and smoothed)
+    plt.subplot(1, 3, 1)
+    plt.plot(metrics["loss"], label='Raw Loss', color='lightblue', alpha=0.6)
+    smoothed_losses = pd.Series(metrics["loss"]).ewm(alpha=0.1).mean()
+    plt.plot(smoothed_losses, label='Smoothed Loss (EMA)', color='blue', linewidth=2)
+    plt.xlabel('Step')
+    plt.ylabel('Loss')
+    plt.title('Training Loss Over Time')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
 
-plt.tight_layout()
-# plt.show()
-plt.savefig("metrics.png", dpi=300, bbox_inches='tight')
-plt.close()
+    # 2. Plot u_ins, u_del, u_sub
+    plt.subplot(1, 3, 2)
+    plt.plot(metrics["u_ins"], label='u_ins', color='green')
+    plt.plot(metrics["u_del"], label='u_del', color='red')
+    plt.plot(metrics["u_sub"], label='u_sub', color='purple')
+    plt.xlabel('Step')
+    plt.ylabel('Value')
+    plt.title('u_ins, u_del, u_sub Over Time')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+
+    # 3. Plot u_tot and u_con
+    plt.subplot(1, 3, 3)
+    plt.plot(metrics["u_tot"], label='u_tot', color='orange')
+    plt.plot(metrics["u_con"], label='u_con', color='brown')
+    plt.xlabel('Step')
+    plt.ylabel('Value')
+    plt.title('u_tot and u_con Over Time')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+
+    plt.tight_layout()
+    # plt.show()
+    plt.savefig("metrics.png", dpi=300, bbox_inches='tight')
+    plt.close()
 
 
 # ## Sampling via First Order Euler Steps
@@ -794,9 +794,9 @@ def load_model_state(model_name: str):
 # (Optional) Save / Load the model state
 from pathlib import Path
 
-save_model = True
-load_model = False
-overwrite = True
+save_model = TRAIN_MODEL
+load_model = not TRAIN_MODEL
+overwrite = TRAIN_MODEL
 
 save_dir = Path(f"results/target_shift_freq_size")
 model_name = Path(f"seq2seq_prior.pt")

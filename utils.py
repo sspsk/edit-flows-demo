@@ -2,9 +2,12 @@ import torch
 import torch.nn.functional as F
 from typing import List, Tuple
 
-BOS_TOKEN = 128
-PAD_TOKEN = 129
-GAP_TOKEN = 130
+V = 32
+L = 32
+
+BOS_TOKEN = V
+PAD_TOKEN = V+1
+GAP_TOKEN = V+2
 
 
 def _align_pair(seq_0: torch.Tensor, seq_1: torch.Tensor) -> Tuple[List[int], List[int]]:
